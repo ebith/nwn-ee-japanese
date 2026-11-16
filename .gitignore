@@ -1,0 +1,8 @@
+# Build output.
+dist/
+
+# Local material kept outside the published tree.
+work/
+
+# Archives made by Release.ps1.
+*.7z
