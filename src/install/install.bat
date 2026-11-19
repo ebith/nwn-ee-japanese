@@ -5,13 +5,15 @@ rem Ship this file together with nwnjp.dll and nwnjp_loader.exe in one folder, p
 rem SEGA update patch (NWNJapanese1.69HotUUpdate.exe). Running install.bat then
 rem   - copies nwnjp.dll and nwnjp_loader.exe next to nwmain.exe,
 rem   - builds dialog.tlk / dialogf.tlk from the SEGA patch and installs them,
-rem   - installs the OFL Japanese font into Documents\Neverwinter Nights\override.
+rem   - installs the OFL Japanese font into Documents\Neverwinter Nights\override,
+rem   - writes a searchable English-Japanese dictionary (nwnjp-dictionary.html) into
+rem     Documents\Neverwinter Nights (or -OutDir).
 rem
 rem Usage: install.bat [-GameDir <path>] [-Patch <path>] [-OutDir <path>] [-Fonts]
 rem
 rem The PowerShell program is embedded below the "#PS1#" marker so that this file and the
 rem two binaries are all that has to be shipped. Each run copies that part to a temporary
-rem .ps1 and executes it; nothing else is written outside the cache and the game directory.
+rem .ps1 and executes it; work files live in a temporary folder that is removed at the end.
 setlocal
 set "SELF=%~f0"
 set "NWNJP_HOME=%~dp0"
@@ -24,7 +26,9 @@ if errorlevel 1 (
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TMPPS%" %*
 set "R=%ERRORLEVEL%"
 del /q "%TMPPS%" >nul 2>&1
+rem Keep the window open after a double-click success; a run with options stays scriptable.
 if not "%R%"=="0" pause
+if "%R%"=="0" if "%~1"=="" pause
 exit /b %R%
 #PS1#
 # Builds a Japanese dialog.tlk and dialogf.tlk for Neverwinter Nights: Enhanced Edition
@@ -33,15 +37,19 @@ exit /b %R%
 #
 # The patch is a 2005 NSIS installer that asks for administrator rights, so it is never run.
 # Its two TLKs are read with 7-Zip: the small standalone 7zr.exe downloads the 7-Zip release,
-# unpacks it into a cache directory, and that 7z.exe then reads the patch. Windows PowerShell
-# 5.1 does the rest, so nothing has to be installed and nothing outside the cache and the
-# game directory is touched.
+# unpacks it into the temporary working folder, and that 7z.exe then reads the patch. Windows
+# PowerShell 5.1 does the rest; the working folder is removed afterwards, and a cache left by
+# an older installer under LocalAppData is reused once and then removed as well.
+#
+# The script also writes a searchable English-Japanese dictionary (nwnjp-dictionary.html)
+# next to the game's user data. Its data is embedded in the page, so it works offline
+# without a server or extra files.
 #
 # Usage:
 #   install.bat                       install into the game found on this machine
 #   install.bat -GameDir "D:\NWN"     use another game directory
 #   install.bat -Patch "C:\x.exe"     use another copy of the SEGA patch
-#   install.bat -OutDir "C:\tmp"      only build the two TLKs into a directory
+#   install.bat -OutDir "C:\tmp"      build the two TLKs and the dictionary into a directory
 #   install.bat -Fonts                reinstall the font even when it is already there
 #
 # Exit codes: 0 done, 1 usage or environment problem, 2 the patch or its contents differ.
@@ -87,6 +95,9 @@ $FontLicenseName = 'BIZUDGothic-OFL.txt'
 
 # The two files that ship next to this script; they are copied next to nwmain.exe.
 $BinaryNames = @('nwnjp.dll', 'nwnjp_loader.exe')
+
+# The searchable English-Japanese dictionary, written next to the game's user data.
+$DictionaryName = 'nwnjp-dictionary.html'
 
 $HeaderSize = 20
 $EntryStride = 40
@@ -239,16 +250,291 @@ function Build-Tlk([string]$TemplatePath, [string]$JapanesePath, [string]$Output
     return $count
 }
 
-# Finds a working 7z.exe: one already in the cache, or one unpacked from the pinned release.
+# The dictionary pairs the English template with the SEGA Japanese table. A template that
+# is already Japanese (for example, another localization overwrote the game's TLK without
+# leaving a backup) would produce Japanese/Japanese pairs, so refuse to build that.
+function Test-EnglishTemplate($Template) {
+    $total = 0
+    $cjk = 0
+    $samples = 0
+    for ($i = 0; $i -lt $Template.Count -and $samples -lt 200; $i++) {
+        $text = Convert-TemplateString (Get-TlkString $Template $i)
+        if ($null -eq $text) { continue }
+        $trimmed = $text.Trim()
+        if ($trimmed.Length -eq 0) { continue }
+        $samples++
+        foreach ($ch in $trimmed.ToCharArray()) {
+            if ([char]::IsWhiteSpace($ch)) { continue }
+            $total++
+            $code = [int]$ch
+            if (($code -ge 0x3000 -and $code -le 0x30FF) -or
+                ($code -ge 0x3400 -and $code -le 0x4DBF) -or
+                ($code -ge 0x4E00 -and $code -le 0x9FFF) -or
+                ($code -ge 0xFF00 -and $code -le 0xFFEF)) {
+                $cjk++
+            }
+        }
+    }
+    if ($total -lt 100) { return $true }
+    return ($cjk / $total) -lt 0.2
+}
+
+# SEGA left temporary markers in the Japanese table; they are not translations. The
+# markers are exact tokens plus the dashed notes that separate dialogue blocks.
+function Test-DictionaryPlaceholder([string]$Text) {
+    $trimmed = $Text.Trim()
+    if ($trimmed -match '^(?:tempin|temp|_temp|test|reuse|\(null\)|\[\*not used\*\])\z') {
+        return $true
+    }
+    if ($trimmed -match '^-{3,}.*(?:Random Conversations|This line must|Random Pop-Ups|inter-party banter).*-{3,}$') {
+        return $true
+    }
+    return $false
+}
+
+# Builds the standalone dictionary. The JSON is embedded in a script element rather than
+# kept as a second file, so the page works offline without a server or extra files.
+function Build-Dictionary([string]$TemplatePath, [string]$JapanesePath, [string]$OutputPath) {
+    $template = Read-Tlk $TemplatePath
+    $japanese = Read-Tlk $JapanesePath
+
+    if (-not (Test-EnglishTemplate $template)) {
+        Write-Note 'the English template could not be identified, so the dictionary was skipped.'
+        return $null
+    }
+
+    $pairs = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $placeholders = 0
+    $limit = [Math]::Min([int]$template.Count, [int]$japanese.Count)
+    for ($i = 0; $i -lt $limit; $i++) {
+        $enText = Convert-TemplateString (Get-TlkString $template $i)
+        if ($null -eq $enText -or $enText.Trim().Length -eq 0) { continue }
+        $jaRaw = Get-TlkString $japanese $i
+        if ($null -eq $jaRaw) { continue }
+        $jaText = $Cp932.GetString($jaRaw)
+        if ($jaText.Trim().Length -eq 0) { continue }
+        if (Test-DictionaryPlaceholder $jaText) { $placeholders++; continue }
+        # Identical pairs repeat often in a dialogue table; keep the first row only.
+        $key = $enText + [char]1 + $jaText
+        if (-not $seen.Add($key)) { continue }
+        $pairs.Add([object[]]@($enText, $jaText))
+    }
+    if ($placeholders -gt 0) {
+        Write-Note ('{0} placeholder entries skipped' -f $placeholders)
+    }
+    if ($pairs.Count -eq 0) {
+        Write-Note 'no English and Japanese pair was found, so the dictionary was skipped.'
+        return $null
+    }
+
+    $json = ConvertTo-Json -Compress -Depth 3 $pairs
+
+    $head = @'
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NWN:EE 英日辞書</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --border: rgba(128, 128, 128, 0.35);
+  --muted: #667;
+  --mark: #ffe66d;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, "Segoe UI", "Yu Gothic UI", "Hiragino Sans", Meiryo, sans-serif;
+  line-height: 1.6;
+}
+header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 12px 16px;
+  background: Canvas;
+  border-bottom: 1px solid var(--border);
+}
+h1 { margin: 0 0 8px; font-size: 1.1rem; }
+.total { margin-left: .6em; font-size: .8rem; font-weight: normal; color: var(--muted); white-space: nowrap; }
+.search { display: flex; gap: 8px; align-items: center; }
+.search label { font-size: .9rem; white-space: nowrap; }
+#q {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: Field;
+  color: FieldText;
+}
+#status { margin: 8px 0 0; min-height: 1.5em; font-size: .85rem; color: var(--muted); }
+main { padding: 0 16px 24px; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { font-size: .8rem; color: var(--muted); font-weight: 600; }
+td { white-space: pre-wrap; overflow-wrap: anywhere; }
+td:first-child { width: 50%; }
+mark { background: var(--mark); color: inherit; }
+@media (max-width: 640px) {
+  td:first-child { width: 45%; }
+}
+</style>
+</head>
+<body>
+<header>
+<h1>Neverwinter Nights: Enhanced Edition 英日辞書 <span class="total">全 <span id="total">0</span> 件</span></h1>
+<div class="search">
+<label for="q">検索</label>
+<input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="英語または日本語で入力">
+</div>
+<p id="status" role="status" aria-live="polite">語句を入力してください</p>
+</header>
+<main>
+<table>
+<thead><tr><th scope="col">英語</th><th scope="col">日本語</th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+</main>
+<noscript>この辞書を検索するには JavaScript を有効にしてください。</noscript>
+<script type="application/json" id="pairs">
+'@
+    $tail = @'
+</script>
+<script>
+(function () {
+  'use strict';
+  var pairs = JSON.parse(document.getElementById('pairs').textContent);
+  var input = document.getElementById('q');
+  var status = document.getElementById('status');
+  var rows = document.getElementById('rows');
+  var total = document.getElementById('total');
+  var LIMIT = 200;
+  var en = new Array(pairs.length);
+  var ja = new Array(pairs.length);
+  var enNorm = new Array(pairs.length);
+  var jaNorm = new Array(pairs.length);
+  var i;
+
+  function normalize(text) {
+    return text.normalize('NFKC').toLowerCase();
+  }
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, function (ch) {
+      if (ch === '&') return '&amp;';
+      if (ch === '<') return '&lt;';
+      if (ch === '>') return '&gt;';
+      if (ch === '"') return '&quot;';
+      return '&#39;';
+    });
+  }
+  function highlight(text, query) {
+    var lower = text.toLowerCase();
+    var index = lower.indexOf(query);
+    if (index < 0) return escapeHtml(text);
+    var end = index + query.length;
+    if (end > text.length) return escapeHtml(text);
+    return escapeHtml(text.slice(0, index)) + '<mark>' + escapeHtml(text.slice(index, end)) + '</mark>' + escapeHtml(text.slice(end));
+  }
+
+  for (i = 0; i < pairs.length; i++) {
+    en[i] = pairs[i][0];
+    ja[i] = pairs[i][1];
+    enNorm[i] = normalize(en[i]);
+    jaNorm[i] = normalize(ja[i]);
+  }
+  total.textContent = pairs.length.toLocaleString('ja-JP');
+
+  function render() {
+    var query = normalize(input.value.trim());
+    rows.textContent = '';
+    if (!query) {
+      status.textContent = '語句を入力してください';
+      return;
+    }
+    var found = 0;
+    var fragment = document.createDocumentFragment();
+    for (var index = 0; index < pairs.length; index++) {
+      if (enNorm[index].indexOf(query) < 0 && jaNorm[index].indexOf(query) < 0) continue;
+      found++;
+      if (found > LIMIT) continue;
+      var row = document.createElement('tr');
+      var english = document.createElement('td');
+      var japanese = document.createElement('td');
+      english.innerHTML = highlight(en[index], query);
+      japanese.innerHTML = highlight(ja[index], query);
+      row.appendChild(english);
+      row.appendChild(japanese);
+      fragment.appendChild(row);
+    }
+    rows.appendChild(fragment);
+    if (found === 0) {
+      status.textContent = '一致する項目はありません';
+    } else if (found > LIMIT) {
+      status.textContent = found.toLocaleString('ja-JP') + ' 件中 ' + LIMIT + ' 件を表示';
+    } else {
+      status.textContent = found.toLocaleString('ja-JP') + ' 件';
+    }
+  }
+
+  var timer = null;
+  input.addEventListener('input', function () {
+    clearTimeout(timer);
+    timer = setTimeout(render, 120);
+  });
+  input.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') {
+      input.value = '';
+      render();
+    }
+  });
+  render();
+  input.focus();
+})();
+</script>
+</body>
+</html>
+'@
+
+    $writer = New-Object System.IO.StreamWriter($OutputPath, $false, $Utf8NoBom)
+    try {
+        $writer.Write($head)
+        $writer.Write($json)
+        $writer.Write($tail)
+    } finally {
+        $writer.Dispose()
+    }
+    return $pairs.Count
+}
+
+# Unpacks the pinned 7-Zip release into the given folder and returns its 7z.exe. A cache left
+# by an older installer under LocalAppData is copied once and removed when the install ends.
 # The release is a 7z self-extracting installer, so something that reads 7z has to come first.
 # Windows' own tar.exe does not do on Windows 10 ("LZMA codec is unsupported"), so the small
 # standalone 7zr.exe (7z only, no installer needed) fetches and unpacks it.
-function Get-SevenZip([string]$CacheRoot) {
-    $toolsDir = Join-Path $CacheRoot ('7zip-' + $SevenZipVersion)
+function Get-SevenZip([string]$Root) {
+    $toolsDir = Join-Path $Root ('7zip-' + $SevenZipVersion)
     $sevenZip = Join-Path $toolsDir '7z.exe'
     $sevenZipDll = Join-Path $toolsDir '7z.dll'
+    if (-not (Test-Path -LiteralPath $sevenZip) -and $env:LOCALAPPDATA) {
+        $legacyDir = Join-Path $env:LOCALAPPDATA ('nwnjp\7zip-' + $SevenZipVersion)
+        if ((Test-Path -LiteralPath (Join-Path $legacyDir '7z.exe')) -and
+            (Test-Path -LiteralPath (Join-Path $legacyDir '7z.dll'))) {
+            New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+            try {
+                Copy-Item -Path (Join-Path $legacyDir '*') -Destination $toolsDir -Recurse -Force -ErrorAction Stop
+                Write-Note ('reused 7-Zip from the previous cache: ' + $legacyDir)
+            } catch {
+                Write-Note ('could not reuse the previous 7-Zip cache: ' + $_.Exception.Message)
+            }
+        }
+    }
     if ((Test-Path -LiteralPath $sevenZip) -and (Test-Path -LiteralPath $sevenZipDll)) {
-        Write-Note ('cached 7-Zip: ' + $toolsDir)
+        Write-Note ('using 7-Zip from ' + $toolsDir)
         return $sevenZip
     }
 
@@ -410,7 +696,7 @@ try {
         Write-Note '      the TLKs inside are checked instead, so this only has to be the same patch'
     }
 
-    $sevenZip = Get-SevenZip (Join-Path $env:LOCALAPPDATA 'nwnjp')
+    $sevenZip = Get-SevenZip $WorkDir
 
     Write-Step 'Reading the TLKs out of the patch'
     $extractDir = Join-Path $WorkDir 'tlk'
@@ -461,12 +747,40 @@ try {
     Build-Tlk $template $segaDialog $builtDialog | Out-Null
     Build-Tlk $template $segaDialogf $builtDialogf | Out-Null
 
+    Write-Step 'Building the dictionary'
+    $dictionaryPath = $null
+    try {
+        $dictionaryDir = $null
+        if ($OutDir) {
+            $dictionaryDir = $OutDir
+        } else {
+            $documents = [Environment]::GetFolderPath('MyDocuments')
+            if ($documents) { $dictionaryDir = Join-Path $documents 'Neverwinter Nights' }
+        }
+        if ($dictionaryDir) {
+            New-Item -ItemType Directory -Force -Path $dictionaryDir | Out-Null
+            $dictionaryPath = Join-Path $dictionaryDir $DictionaryName
+            $pairCount = Build-Dictionary $template $segaDialog $dictionaryPath
+            if ($null -ne $pairCount) {
+                Write-Note ('{0}: {1} pairs, {2} bytes' -f $dictionaryPath, $pairCount, (Get-Item -LiteralPath $dictionaryPath).Length)
+            } else {
+                $dictionaryPath = $null
+            }
+        } else {
+            Write-Note 'the Documents folder was not found, so the dictionary was skipped.'
+        }
+    } catch {
+        $dictionaryPath = $null
+        Write-Note ('dictionary: could not be generated: ' + $_.Exception.Message)
+    }
+
     if ($OutDir) {
         New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
         Copy-Item -LiteralPath $builtDialog -Destination (Join-Path $OutDir 'dialog.tlk') -Force
         Copy-Item -LiteralPath $builtDialogf -Destination (Join-Path $OutDir 'dialogf.tlk') -Force
         Write-Step 'Done'
         Write-Note ('wrote dialog.tlk and dialogf.tlk into ' + $OutDir)
+        if ($dictionaryPath) { Write-Note ('wrote ' + $DictionaryName + ' into ' + $OutDir) }
     } else {
         Write-Step 'Installing the fonts'
         Install-Fonts ([bool]$Fonts)
@@ -489,15 +803,29 @@ try {
             }
             Write-Host ('  ' + $builtDialog + '  ->  ' + $dialogTarget)
             Write-Host ('  ' + $builtDialogf + '  ->  ' + $dialogfTarget)
+            if ($dictionaryPath) { Write-Host ('Dictionary: ' + $dictionaryPath) }
             exit 1
         }
         Write-Host ''
         Write-Host ('Finished. Start the game through ' + (Join-Path $game 'bin\win32\nwnjp_loader.exe'))
+        if ($dictionaryPath) { Write-Host ('Dictionary: ' + $dictionaryPath) }
     }
     exit 0
 } finally {
     if (Test-Path -LiteralPath $WorkDir) {
         Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # Older installers cached 7-Zip under LocalAppData; remove that copy and the folder when empty.
+    if ($env:LOCALAPPDATA) {
+        $legacyRoot = Join-Path $env:LOCALAPPDATA 'nwnjp'
+        if (Test-Path -LiteralPath $legacyRoot) {
+            Get-ChildItem -LiteralPath $legacyRoot -Directory -Filter '7zip-*' -ErrorAction SilentlyContinue |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+            $remaining = @(Get-ChildItem -LiteralPath $legacyRoot -Force -ErrorAction SilentlyContinue)
+            if ($remaining.Count -eq 0) {
+                Remove-Item -LiteralPath $legacyRoot -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
