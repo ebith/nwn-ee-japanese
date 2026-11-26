@@ -8,7 +8,7 @@ if not exist "%DIST%\obj" mkdir "%DIST%\obj"
 pushd "%~dp0"
 cl /nologo /std:c++20 /O2 /EHsc /MT /W4 /LD /Fe:"%DIST%\nwnjp.dll" /Fo:"%DIST%\obj\\" nwnjp.cpp
 if errorlevel 1 goto done
-cl /nologo /std:c++20 /O2 /EHsc /MT /W4 /Fe:"%DIST%\nwnjp_loader.exe" /Fo:"%DIST%\obj\\" launcher.cpp
+cl /nologo /std:c++20 /utf-8 /O2 /EHsc /MT /W4 /Fe:"%DIST%\nwnjp_loader.exe" /Fo:"%DIST%\obj\\" launcher.cpp
 :done
 set R=%errorlevel%
 popd
