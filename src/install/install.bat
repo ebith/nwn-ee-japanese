@@ -6,7 +6,8 @@ rem SEGA update patch (NWNJapanese1.69HotUUpdate.exe). Running install.bat then
 rem   - copies nwnjp.dll and nwnjp_loader.exe next to nwmain.exe,
 rem   - builds dialog.tlk / dialogf.tlk from the SEGA patch and installs them,
 rem   - installs the OFL Japanese font into Documents\Neverwinter Nights\override,
-rem   - writes a searchable English-Japanese dictionary (nwnjp-dictionary.html) into
+rem   - writes a searchable English-Japanese dictionary (nwnjp-dictionary.html) and the
+rem     Japanese movie narration (nwnjp-movie-subtitles.txt) into
 rem     Documents\Neverwinter Nights (or -OutDir).
 rem
 rem Usage: install.bat [-GameDir <path>] [-Patch <path>] [-OutDir <path>] [-Fonts]
@@ -43,13 +44,15 @@ exit /b %R%
 #
 # The script also writes a searchable English-Japanese dictionary (nwnjp-dictionary.html)
 # next to the game's user data. Its data is embedded in the page, so it works offline
-# without a server or extra files.
+# without a server or extra files. The campaign movie narration is written to
+# nwnjp-movie-subtitles.txt in the same folder; every line and chapter label there is
+# read from the SEGA table, so the script adds no translation of its own.
 #
 # Usage:
 #   install.bat                       install into the game found on this machine
 #   install.bat -GameDir "D:\NWN"     use another game directory
 #   install.bat -Patch "C:\x.exe"     use another copy of the SEGA patch
-#   install.bat -OutDir "C:\tmp"      build the two TLKs and the dictionary into a directory
+#   install.bat -OutDir "C:\tmp"      build the two TLKs, the dictionary and the movie text
 #   install.bat -Fonts                reinstall the font even when it is already there
 #
 # Exit codes: 0 done, 1 usage or environment problem, 2 the patch or its contents differ.
@@ -99,10 +102,14 @@ $BinaryNames = @('nwnjp.dll', 'nwnjp_loader.exe')
 # The searchable English-Japanese dictionary, written next to the game's user data.
 $DictionaryName = 'nwnjp-dictionary.html'
 
+# The campaign movie narration, written next to the dictionary.
+$MovieTextName = 'nwnjp-movie-subtitles.txt'
+
 $HeaderSize = 20
 $EntryStride = 40
 
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$Utf8Bom = New-Object System.Text.UTF8Encoding($true)
 $Utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
 $Cp932 = [System.Text.Encoding]::GetEncoding(932)
 $Cp1252 = [System.Text.Encoding]::GetEncoding(1252)
@@ -511,6 +518,58 @@ mark { background: var(--mark); color: inherit; }
     return $pairs.Count
 }
 
+# The campaign movies and the dialog.tlk entries their subtitles show, in playback
+# order. Title is the TLK chapter label used as the heading and Lines are the narration
+# entries; both are strrefs into the SEGA table, so the output file contains no text
+# this script invents. The lists were checked against the burned-in English subtitles
+# of the EE .wbm movies: 61995 is an unused variant of 61996, and 110099 is the single
+# entry that carries the whole Hordes of the Underdark intro.
+$MovieScript = @(
+    @{ Title = 67705; Lines = @(61978, 61979, 61980, 61981, 61982, 61983, 61984, 61988) }
+    @{ Title = 5557; Lines = @(61989, 61990, 61991) }
+    @{ Title = 5558; Lines = @(61992, 61993, 61994, 61996) }
+    @{ Title = 5559; Lines = @(61997, 61998, 61999, 62000) }
+    @{ Title = 5560; Lines = @(62001, 62002, 62003, 62004) }
+    @{ Title = 67559; Lines = @(62005, 62006, 62007, 62008, 62009) }
+    @{ Title = 9035; Lines = @(76437, 76438, 76439, 76440, 76441) }
+    @{ Title = 9037; Lines = @(76442, 76443) }
+    @{ Title = 40043; Lines = @(76444, 76445, 76446) }
+    @{ Title = 67559; Lines = @(76447, 76448, 76449, 76450) }
+    @{ Title = 100777; Lines = @(110099) }
+)
+
+# Writes the movie narration as plain text. Every heading and every line is read from
+# the SEGA table, so the file is a copy of the patch's Japanese text, not a translation.
+# Chapter headings are wrapped in ** and a blank line separates chapters; the lines
+# inside a chapter run together. The Hordes intro is one entry with line breaks of its
+# own, so those breaks stay but the blank lines inside it are collapsed.
+function Build-MovieText([string]$JapanesePath, [string]$OutputPath) {
+    $japanese = Read-Tlk $JapanesePath
+    $writer = New-Object System.IO.StreamWriter($OutputPath, $false, $Utf8Bom)
+    $count = 0
+    $chapters = 0
+    try {
+        foreach ($movie in $MovieScript) {
+            $title = Get-TlkString $japanese $movie.Title
+            if ($null -eq $title) { continue }
+            if ($chapters -gt 0) { $writer.WriteLine('') }
+            $writer.WriteLine('** ' + $Cp932.GetString($title).Trim() + ' **')
+            $chapters++
+            foreach ($index in $movie.Lines) {
+                $raw = Get-TlkString $japanese $index
+                if ($null -eq $raw) { continue }
+                $text = $Cp932.GetString($raw).Trim() -replace "\r\n|\r|\n", "`r`n"
+                $text = $text -replace "(`r`n){2,}", "`r`n"
+                $writer.WriteLine($text)
+                $count++
+            }
+        }
+    } finally {
+        $writer.Dispose()
+    }
+    return $count
+}
+
 # Unpacks the pinned 7-Zip release into the given folder and returns its 7z.exe. A cache left
 # by an older installer under LocalAppData is copied once and removed when the install ends.
 # The release is a 7z self-extracting installer, so something that reads 7z has to come first.
@@ -749,8 +808,8 @@ try {
 
     Write-Step 'Building the dictionary'
     $dictionaryPath = $null
+    $dictionaryDir = $null
     try {
-        $dictionaryDir = $null
         if ($OutDir) {
             $dictionaryDir = $OutDir
         } else {
@@ -774,6 +833,21 @@ try {
         Write-Note ('dictionary: could not be generated: ' + $_.Exception.Message)
     }
 
+    Write-Step 'Building the movie text'
+    $movieTextPath = $null
+    try {
+        if ($dictionaryDir) {
+            $movieTextPath = Join-Path $dictionaryDir $MovieTextName
+            $movieEntries = Build-MovieText $segaDialog $movieTextPath
+            Write-Note ('{0}: {1} lines, {2} bytes' -f $movieTextPath, $movieEntries, (Get-Item -LiteralPath $movieTextPath).Length)
+        } else {
+            Write-Note 'the Documents folder was not found, so the movie text was skipped.'
+        }
+    } catch {
+        $movieTextPath = $null
+        Write-Note ('movie text: could not be generated: ' + $_.Exception.Message)
+    }
+
     if ($OutDir) {
         New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
         Copy-Item -LiteralPath $builtDialog -Destination (Join-Path $OutDir 'dialog.tlk') -Force
@@ -781,6 +855,7 @@ try {
         Write-Step 'Done'
         Write-Note ('wrote dialog.tlk and dialogf.tlk into ' + $OutDir)
         if ($dictionaryPath) { Write-Note ('wrote ' + $DictionaryName + ' into ' + $OutDir) }
+        if ($movieTextPath) { Write-Note ('wrote ' + $MovieTextName + ' into ' + $OutDir) }
     } else {
         Write-Step 'Installing the fonts'
         Install-Fonts ([bool]$Fonts)
@@ -804,11 +879,13 @@ try {
             Write-Host ('  ' + $builtDialog + '  ->  ' + $dialogTarget)
             Write-Host ('  ' + $builtDialogf + '  ->  ' + $dialogfTarget)
             if ($dictionaryPath) { Write-Host ('Dictionary: ' + $dictionaryPath) }
+            if ($movieTextPath) { Write-Host ('Movie text: ' + $movieTextPath) }
             exit 1
         }
         Write-Host ''
         Write-Host ('Finished. Start the game through ' + (Join-Path $game 'bin\win32\nwnjp_loader.exe'))
         if ($dictionaryPath) { Write-Host ('Dictionary: ' + $dictionaryPath) }
+        if ($movieTextPath) { Write-Host ('Movie text: ' + $movieTextPath) }
     }
     exit 0
 } finally {
