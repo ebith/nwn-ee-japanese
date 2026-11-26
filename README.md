@@ -12,7 +12,7 @@
 - SteamのライブラリからNWN:EEを選び、歯車アイコン => プロパティ => 一般で起動オプションに`"C:\Program Files (x86)\Steam\steamapps\common\Neverwinter Nights\bin\win32\nwnjp_loader.exe" %command%`を入力する
 - プレイ
 
-## 注意
+## 備考
 - 対応バージョンは89.8193.37-17
 - インストール時に生成される`Documents\Neverwinter Nights\nwnjp-dictionary.html`は検索可能な英日テーブルで英語の攻略情報を探したい場合などに便利
 - 同じフォルダに生成される`nwnjp-movie-subtitles.txt`はムービーの日本語字幕に相当するテキスト
