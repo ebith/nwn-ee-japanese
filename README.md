@@ -21,5 +21,7 @@
 ## 本編及びDLCを快適に遊ぶためのメモ
 - ビルドに迷ったら [Lilura1: BEST BUILDS Neverwinter Nights NWN, Class Solo Beginner](https://lilura1.blogspot.com/2021/01/Neverwinter-Nights-NWN-Best-Build-Class-Solo-Beginner.html)
 - 仲間の操作や高速バフで便利に遊ぶなら  [Philos' Enhancing Player System (PEPS) | The Neverwinter Vault](https://neverwintervault.org/project/nwnee/script/philos-enhancing-player-system-peps)
+  - PEPSを入れた場合1章エピローグ突入前に連れていきたい仲間以外から貰った契約アイテムを全て捨てておく必要がある
+- 仲間の個人クエストを次の章でも続けるには前の章で受け取った報酬アイテムを主人公が持ったままにする必要がある
 - 鍵開けや罠解除の待ち時間を短くするにはDocuments\Neverwinter Nights\developmentにこの[ruleset.2da](https://gist.github.com/ebith/2dfeffc943e94bb174ef0e1cc344fdfe)を入れる
 - セーブデータを編集したかったら [yabisiktir/nwn-save-editor](https://github.com/yabisiktir/nwn-save-editor)
