@@ -126,9 +126,8 @@ void HookedBake(const char *path, float size, int *chars, int count, float p5,
 }
 
 /// Site pointer for a runtime patch, or nullptr when the bytes are not inside the loaded
-/// image. Reading them unconditionally faults whenever this DLL ends up in a host whose
-/// image is smaller than the game's (the smoke test in `work/out/probe/smoke` found this), and
-/// such a host has nothing to patch anyway.
+/// image. Reading them unconditionally faults in a host whose image is smaller than the
+/// game's, and such a host has nothing to patch anyway.
 uint8_t *PatchSite(HMODULE module, uintptr_t rva, size_t size) {
     if (module == nullptr) return nullptr;
     auto *base = reinterpret_cast<uint8_t *>(module);
