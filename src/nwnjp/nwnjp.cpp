@@ -1052,6 +1052,46 @@ bool NeutraliseToUtf8Branch() {
     return true;
 }
 
+/// Encoding::FromUTF8 is the reverse direction of ToUTF8: it decodes every UTF-8 sequence
+/// and looks the code point up in the same fixed table, which has no Japanese entries, so
+/// each character comes back as '?'. That hits text the game only renders through this path
+/// (the PEPS widget's hover label showed "   ??? ??????????" for a henchman name). The
+/// process treats UTF-8 as its ANSI code page, so both directions are byte copies, and the
+/// char* overload of ToUTF8 already is one once kToUtf8BranchRva is neutralised. Redirecting
+/// FromUTF8's entry at ToUTF8 keeps the engine's own std::string construction (same
+/// allocator, same layout); the std::string overload of FromUTF8 only forwards src.c_str()
+/// to this entry.
+constexpr uintptr_t kFromUtf8Rva = 0x2F0EA0u;
+constexpr uintptr_t kToUtf8EntryRva = 0x2F19A0u;
+constexpr uint8_t kFromUtf8Prologue[5] = { 0x48, 0x8B, 0xC4, 0x55, 0x57 };  // mov rax,rsp; push rbp; push rdi
+
+bool RedirectFromUtf8ToByteCopy() {
+    HMODULE base = GetModuleHandleA(nullptr);
+    auto *site = PatchSite(base, kFromUtf8Rva, sizeof(kFromUtf8Prologue));
+    auto *target = PatchSite(base, kToUtf8EntryRva, 1);
+    if (site == nullptr || target == nullptr) return false;
+    const int32_t rel = static_cast<int32_t>(target - (site + sizeof(kFromUtf8Prologue)));
+    uint8_t jump[sizeof(kFromUtf8Prologue)] = { 0xE9 };
+    memcpy(jump + 1, &rel, sizeof(rel));
+    if (memcmp(site, jump, sizeof(jump)) == 0) {
+        Log("[utf8] FromUTF8 already redirected to ToUTF8");
+        return true;
+    }
+    if (memcmp(site, kFromUtf8Prologue, sizeof(kFromUtf8Prologue)) != 0) {
+        Log("[utf8] unexpected bytes at the FromUTF8 entry, skipping");
+        return false;
+    }
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(site, sizeof(jump), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        Log("[utf8] VirtualProtect failed: %lu", GetLastError());
+        return false;
+    }
+    memcpy(site, jump, sizeof(jump));
+    VirtualProtect(site, sizeof(jump), oldProtect, &oldProtect);
+    Log("[utf8] FromUTF8 redirected to ToUTF8 (rel %d)", rel);
+    return true;
+}
+
 /// The process code page used to be raised by the executable's manifest
 /// (activeCodePage=UTF-8). The loader has already run by the time this DLL is injected,
 /// but the code page itself is only a global that GetACP reads:
@@ -1106,6 +1146,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         RaiseProcessCodePage();
         RelocateNuiRangeTable();
         NeutraliseToUtf8Branch();
+        RedirectFromUtf8ToByteCopy();
         PatchGlyphBounds();
         InstallAtlasSizing();
         InstallPackPadding();
